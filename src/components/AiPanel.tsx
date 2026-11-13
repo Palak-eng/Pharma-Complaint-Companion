@@ -1,10 +1,12 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bot,
   CheckCircle2,
+  Copy,
   FileText,
   Loader2,
+  Search,
   Send,
   ShieldAlert,
   UploadCloud,
@@ -17,21 +19,39 @@ import {
   pushChat,
   setChatPending,
   setProgress,
+  setRootCause,
+  setDuplicates,
+  setCapa,
+  setAiSummary,
+  setCompleteness,
   startExtraction,
 } from "@/store/complaintSlice";
-import { extractComplaint, askAssistant } from "@/lib/extract.functions";
+import {
+  extractComplaintApi,
+  askAssistantApi,
+  analyzeRootCauseApi,
+  checkDuplicatesApi,
+  generateCAPAApi,
+  generateSummaryApi,
+  checkCompletenessApi,
+} from "@/lib/api";
 import { SAMPLE_COMPLAINT } from "@/lib/sample-complaint";
 
 async function readFileText(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
-  const raw = new TextDecoder("latin1").decode(buf);
   if (file.name.toLowerCase().endsWith(".pdf")) {
+    const raw = new TextDecoder("latin1").decode(buf);
     const matches = raw.match(/\((?:\\.|[^()\\])*\)/g) ?? [];
     const text = matches
       .map((m) => m.slice(1, -1).replace(/\\([()\\])/g, "$1"))
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
+    if (text.length < 20) {
+      throw new Error(
+        "Could not extract readable text from this PDF. It may be scanned/image-based. Please paste the complaint text instead.",
+      );
+    }
     return text;
   }
   return new TextDecoder("utf-8").decode(buf);
@@ -45,7 +65,9 @@ function RiskBadge({ level }: { level: string }) {
         ? "border-warning/50 bg-warning/15 text-warning-foreground"
         : "border-success/50 bg-success/15 text-success";
   return (
-    <span className={`rounded-md border px-2.5 py-1 text-xs font-bold uppercase tracking-wide ${tone}`}>
+    <span
+      className={`rounded-md border px-2.5 py-1 text-xs font-bold uppercase tracking-wide ${tone}`}
+    >
       {level || "—"}
     </span>
   );
@@ -60,8 +82,8 @@ function List({ icon, title, items }: { icon: React.ReactNode; title: string; it
         {title}
       </h4>
       <ul className="space-y-1 text-sm text-foreground">
-        {items.map((i) => (
-          <li key={i} className="flex gap-2">
+        {items.map((i, idx) => (
+          <li key={idx} className="flex gap-2">
             <span className="text-primary">•</span>
             <span>{i}</span>
           </li>
@@ -71,18 +93,91 @@ function List({ icon, title, items }: { icon: React.ReactNode; title: string; it
   );
 }
 
+function CollapsibleSection({
+  title,
+  icon,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold"
+      >
+        <span className="flex items-center gap-2">
+          {icon}
+          {title}
+        </span>
+        <span className="text-muted-foreground">{open ? "−" : "+"}</span>
+      </button>
+      {open ? <div className="border-t border-border px-4 py-3">{children}</div> : null}
+    </div>
+  );
+}
+
 export function AiPanel() {
   const dispatch = useAppDispatch();
-  const { status, progress, progressLabel, error, assessment, sourceName, chat, chatPending, fields } =
-    useAppSelector((s) => s.complaint);
+  const {
+    status,
+    progress,
+    progressLabel,
+    error,
+    assessment,
+    sourceName,
+    chat,
+    chatPending,
+    fields,
+    rootCause,
+    duplicates,
+    capa,
+    aiSummary,
+    completeness,
+  } = useAppSelector((s) => s.complaint);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [question, setQuestion] = useState("");
+  const [aiLoading, setAiLoading] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  async function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    try {
+      const text = await readFileText(file);
+      void run(text, file.name);
+    } catch (err) {
+      dispatch(extractionFailed(err instanceof Error ? err.message : "Failed to read file"));
+    }
+  }
 
   async function run(text: string, name: string) {
     if (text.trim().length < 20) {
-      dispatch(extractionFailed("Could not read enough text from that source. Paste the complaint text instead."));
+      dispatch(
+        extractionFailed(
+          "Could not read enough text from that source. Paste the complaint text instead.",
+        ),
+      );
       return;
     }
     dispatch(startExtraction({ text, name }));
@@ -95,8 +190,10 @@ export function AiPanel() {
       return Math.round(tick);
     }
     try {
-      dispatch(setProgress({ value: 22, label: "Analyzing document content and extracting key details…" }));
-      const result = await extractComplaint({ data: { text } });
+      dispatch(
+        setProgress({ value: 22, label: "Analyzing document content and extracting key details…" }),
+      );
+      const result = await extractComplaintApi(text);
       clearInterval(timer);
       dispatch(extractionSuccess(result));
       dispatch(
@@ -119,31 +216,106 @@ export function AiPanel() {
     dispatch(setChatPending(true));
     try {
       const ctx = JSON.stringify({ fields, assessment });
-      const { answer } = await askAssistant({ data: { question: q, context: ctx } });
+      const { answer } = await askAssistantApi(q, ctx);
       dispatch(pushChat({ role: "assistant", content: answer }));
     } catch {
-      dispatch(pushChat({ role: "assistant", content: "Sorry, I couldn't answer that right now." }));
+      dispatch(
+        pushChat({ role: "assistant", content: "Sorry, I couldn't answer that right now." }),
+      );
     } finally {
       dispatch(setChatPending(false));
     }
   }
 
+  async function runRootCause() {
+    setAiLoading("rootCause");
+    try {
+      const result = await analyzeRootCauseApi(fields);
+      dispatch(setRootCause(result));
+    } catch {
+      dispatch(pushChat({ role: "assistant", content: "Root cause analysis failed." }));
+    } finally {
+      setAiLoading(null);
+    }
+  }
+
+  async function runDuplicateCheck() {
+    setAiLoading("duplicates");
+    try {
+      const result = await checkDuplicatesApi(fields);
+      dispatch(setDuplicates(result));
+    } catch {
+      dispatch(pushChat({ role: "assistant", content: "Duplicate check failed." }));
+    } finally {
+      setAiLoading(null);
+    }
+  }
+
+  async function runCAPA() {
+    setAiLoading("capa");
+    try {
+      if (!assessment) return;
+      const result = await generateCAPAApi(fields, assessment);
+      dispatch(setCapa(result));
+    } catch {
+      dispatch(pushChat({ role: "assistant", content: "CAPA generation failed." }));
+    } finally {
+      setAiLoading(null);
+    }
+  }
+
+  async function runSummary() {
+    setAiLoading("summary");
+    try {
+      if (!assessment) return;
+      const result = await generateSummaryApi(fields, assessment);
+      dispatch(setAiSummary(result));
+    } catch {
+      dispatch(pushChat({ role: "assistant", content: "Summary generation failed." }));
+    } finally {
+      setAiLoading(null);
+    }
+  }
+
+  async function runCompleteness() {
+    setAiLoading("completeness");
+    try {
+      const result = await checkCompletenessApi(fields);
+      dispatch(setCompleteness(result));
+    } catch {
+      dispatch(pushChat({ role: "assistant", content: "Completeness check failed." }));
+    } finally {
+      setAiLoading(null);
+    }
+  }
+
+  const hasData = status === "done" && assessment;
+
   return (
     <aside className="flex h-full flex-col gap-5 overflow-y-auto border-l border-border bg-surface px-6 py-7">
       <div className="flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-lg font-bold">
-          <Bot className="size-5 text-primary" /> AI Complaint Intake Assistant
+          <Bot className="size-5 text-primary" /> AI Complaint Assistant
         </h2>
-        <span className="rounded-md bg-accent px-2 py-0.5 text-xs font-bold text-accent-foreground">BETA</span>
+        <span className="rounded-md bg-accent px-2 py-0.5 text-xs font-bold text-accent-foreground">
+          BETA
+        </span>
       </div>
 
       <button
         type="button"
         onClick={() => fileRef.current?.click()}
-        className="rounded-lg border-2 border-dashed border-input bg-card px-6 py-8 text-center transition-colors hover:border-ring"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`rounded-lg border-2 border-dashed bg-card px-6 py-8 text-center transition-colors ${
+          isDragging ? "border-primary bg-primary/5" : "border-input hover:border-ring"
+        }`}
       >
         <UploadCloud className="mx-auto size-7 text-muted-foreground" />
-        <p className="mt-2 text-sm font-semibold">Drag &amp; drop complaint document here</p>
+        <p className="mt-2 text-sm font-semibold">
+          {isDragging ? "Drop file here" : "Drag & drop complaint document here"}
+        </p>
         <p className="text-sm text-muted-foreground">
           or <span className="font-semibold text-primary">click to browse</span>
         </p>
@@ -156,8 +328,12 @@ export function AiPanel() {
         onChange={async (e) => {
           const file = e.target.files?.[0];
           if (!file) return;
-          const text = await readFileText(file);
-          void run(text, file.name);
+          try {
+            const text = await readFileText(file);
+            void run(text, file.name);
+          } catch (err) {
+            dispatch(extractionFailed(err instanceof Error ? err.message : "Failed to read file"));
+          }
           e.target.value = "";
         }}
       />
@@ -221,7 +397,9 @@ export function AiPanel() {
           <p className="text-sm text-muted-foreground">
             {progressLabel || (status === "extracting" ? "Working…" : "")}
           </p>
-          {sourceName ? <p className="text-xs text-muted-foreground">Source: {sourceName}</p> : null}
+          {sourceName ? (
+            <p className="text-xs text-muted-foreground">Source: {sourceName}</p>
+          ) : null}
         </div>
       ) : null}
 
@@ -277,6 +455,201 @@ export function AiPanel() {
         </div>
       ) : null}
 
+      {hasData ? (
+        <div className="space-y-3">
+          <h3 className="section-title">AI Analysis Tools</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => void runRootCause()}
+              disabled={!!aiLoading}
+              className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium transition-colors hover:bg-secondary disabled:opacity-50"
+            >
+              {aiLoading === "rootCause" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Search className="size-3.5" />
+              )}
+              Root Cause
+            </button>
+            <button
+              type="button"
+              onClick={() => void runDuplicateCheck()}
+              disabled={!!aiLoading}
+              className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium transition-colors hover:bg-secondary disabled:opacity-50"
+            >
+              {aiLoading === "duplicates" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Copy className="size-3.5" />
+              )}
+              Duplicates
+            </button>
+            <button
+              type="button"
+              onClick={() => void runCAPA()}
+              disabled={!!aiLoading}
+              className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium transition-colors hover:bg-secondary disabled:opacity-50"
+            >
+              {aiLoading === "capa" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-3.5" />
+              )}
+              CAPA
+            </button>
+            <button
+              type="button"
+              onClick={() => void runSummary()}
+              disabled={!!aiLoading}
+              className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium transition-colors hover:bg-secondary disabled:opacity-50"
+            >
+              {aiLoading === "summary" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <FileText className="size-3.5" />
+              )}
+              Summary
+            </button>
+            <button
+              type="button"
+              onClick={() => void runCompleteness()}
+              disabled={!!aiLoading}
+              className="col-span-2 flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-xs font-medium transition-colors hover:bg-secondary disabled:opacity-50"
+            >
+              {aiLoading === "completeness" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <AlertTriangle className="size-3.5" />
+              )}
+              Completeness Check
+            </button>
+          </div>
+
+          {rootCause ? (
+            <CollapsibleSection
+              title="Root Cause Analysis"
+              icon={<Wrench className="size-4" />}
+              defaultOpen
+            >
+              <List
+                icon={<Wrench className="size-3.5" />}
+                title="Probable Causes"
+                items={rootCause.probable_causes}
+              />
+              <List
+                icon={<Search className="size-3.5" />}
+                title="Investigation Steps"
+                items={rootCause.investigation_steps}
+              />
+            </CollapsibleSection>
+          ) : null}
+
+          {duplicates ? (
+            <CollapsibleSection
+              title="Duplicate Detection"
+              icon={<Copy className="size-4" />}
+              defaultOpen
+            >
+              {duplicates.is_duplicate ? (
+                <div className="mb-2 rounded-md border border-warning/40 bg-warning/10 p-2 text-sm text-warning-foreground">
+                  Potential duplicate detected (confidence:{" "}
+                  {Math.round(duplicates.confidence * 100)}%)
+                </div>
+              ) : (
+                <div className="mb-2 rounded-md border border-success/40 bg-success/10 p-2 text-sm text-success">
+                  No duplicates found
+                </div>
+              )}
+              {duplicates.similar_complaints.length > 0 ? (
+                <ul className="space-y-1 text-sm">
+                  {duplicates.similar_complaints.map((c, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="font-semibold">{c.complaint_id}</span>
+                      <span className="text-muted-foreground">{c.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </CollapsibleSection>
+          ) : null}
+
+          {capa ? (
+            <CollapsibleSection
+              title="CAPA Recommendations"
+              icon={<CheckCircle2 className="size-4" />}
+              defaultOpen
+            >
+              <List
+                icon={<AlertTriangle className="size-3.5" />}
+                title="Immediate Actions"
+                items={capa.immediate_actions}
+              />
+              <List
+                icon={<Wrench className="size-3.5" />}
+                title="Corrective Actions"
+                items={capa.corrective_actions}
+              />
+              <List
+                icon={<ShieldAlert className="size-3.5" />}
+                title="Preventive Actions"
+                items={capa.preventive_actions}
+              />
+              <List
+                icon={<CheckCircle2 className="size-3.5" />}
+                title="Regulatory Requirements"
+                items={capa.regulatory_requirements}
+              />
+            </CollapsibleSection>
+          ) : null}
+
+          {aiSummary ? (
+            <CollapsibleSection
+              title="Complaint Summary"
+              icon={<FileText className="size-4" />}
+              defaultOpen
+            >
+              <p className="text-sm">{aiSummary.summary}</p>
+              <h4 className="mt-2 mb-1 text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                Executive Brief
+              </h4>
+              <p className="text-sm text-muted-foreground">{aiSummary.executive_brief}</p>
+            </CollapsibleSection>
+          ) : null}
+
+          {completeness ? (
+            <CollapsibleSection
+              title="Completeness Check"
+              icon={<AlertTriangle className="size-4" />}
+              defaultOpen
+            >
+              <div className="mb-2">
+                <div className="mb-1 flex items-center justify-between text-xs font-semibold text-muted-foreground">
+                  <span>Score</span>
+                  <span>{completeness.score}%</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-secondary">
+                  <div
+                    className={`h-full rounded-full ${completeness.score >= 80 ? "bg-success" : completeness.score >= 50 ? "bg-warning" : "bg-destructive"}`}
+                    style={{ width: `${completeness.score}%` }}
+                  />
+                </div>
+              </div>
+              <List
+                icon={<AlertTriangle className="size-3.5" />}
+                title="Missing Fields"
+                items={completeness.missing_fields}
+              />
+              <List
+                icon={<CheckCircle2 className="size-3.5" />}
+                title="Suggestions"
+                items={completeness.suggestions}
+              />
+            </CollapsibleSection>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="mt-auto space-y-3 pt-2">
         <h3 className="section-title">AI Assistant</h3>
         <div className="space-y-3">
@@ -284,8 +657,8 @@ export function AiPanel() {
             <div className="flex gap-3 rounded-lg border border-accent bg-accent/50 p-3 text-sm">
               <Bot className="mt-0.5 size-4 shrink-0 text-primary" />
               <p>
-                Upload a complaint document or paste text above. I will extract the details, populate the
-                form and assess QMS risk for you.
+                Upload a complaint document or paste text above. I will extract the details,
+                populate the form and assess QMS risk for you.
               </p>
             </div>
           ) : (

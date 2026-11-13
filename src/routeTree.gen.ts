@@ -10,33 +10,43 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ComplaintsComplaintIdRouteImport } from './routes/complaints.$complaintId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ComplaintsComplaintIdRoute = ComplaintsComplaintIdRouteImport.update({
+  id: '/complaints/$complaintId',
+  path: '/complaints/$complaintId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/complaints/$complaintId': typeof ComplaintsComplaintIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/complaints/$complaintId': typeof ComplaintsComplaintIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/complaints/$complaintId': typeof ComplaintsComplaintIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/complaints/$complaintId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/complaints/$complaintId'
+  id: '__root__' | '/' | '/complaints/$complaintId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ComplaintsComplaintIdRoute: typeof ComplaintsComplaintIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +58,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/complaints/$complaintId': {
+      id: '/complaints/$complaintId'
+      path: '/complaints/$complaintId'
+      fullPath: '/complaints/$complaintId'
+      preLoaderRoute: typeof ComplaintsComplaintIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ComplaintsComplaintIdRoute: ComplaintsComplaintIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -29,6 +29,21 @@ export type Assessment = {
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
+export type RootCauseResult = { probable_causes: string[]; investigation_steps: string[] };
+export type DuplicateResult = {
+  is_duplicate: boolean;
+  similar_complaints: Array<{ complaint_id: string; similarity: string; reason: string }>;
+  confidence: number;
+};
+export type CAPAResult = {
+  immediate_actions: string[];
+  corrective_actions: string[];
+  preventive_actions: string[];
+  regulatory_requirements: string[];
+};
+export type SummaryResult = { summary: string; executive_brief: string };
+export type CompletenessResult = { score: number; missing_fields: string[]; suggestions: string[] };
+
 export const emptyFields: ComplaintFields = {
   complaint_source: "",
   customer_name: "",
@@ -57,6 +72,11 @@ type State = {
   chat: ChatMessage[];
   chatPending: boolean;
   saved: { id: string; fields: ComplaintFields; risk: string }[];
+  rootCause: RootCauseResult | null;
+  duplicates: DuplicateResult | null;
+  capa: CAPAResult | null;
+  aiSummary: SummaryResult | null;
+  completeness: CompletenessResult | null;
 };
 
 const initialState: State = {
@@ -71,6 +91,11 @@ const initialState: State = {
   chat: [],
   chatPending: false,
   saved: [],
+  rootCause: null,
+  duplicates: null,
+  capa: null,
+  aiSummary: null,
+  completeness: null,
 };
 
 const slice = createSlice({
@@ -81,15 +106,7 @@ const slice = createSlice({
       state.fields[a.payload.key] = a.payload.value;
     },
     resetForm(state) {
-      state.fields = emptyFields;
-      state.assessment = null;
-      state.status = "idle";
-      state.progress = 0;
-      state.progressLabel = "";
-      state.error = null;
-      state.sourceText = "";
-      state.sourceName = "";
-      state.chat = [];
+      return { ...initialState, saved: state.saved };
     },
     startExtraction(state, a: PayloadAction<{ text: string; name: string }>) {
       state.status = "extracting";
@@ -98,6 +115,11 @@ const slice = createSlice({
       state.error = null;
       state.sourceText = a.payload.text;
       state.sourceName = a.payload.name;
+      state.rootCause = null;
+      state.duplicates = null;
+      state.capa = null;
+      state.aiSummary = null;
+      state.completeness = null;
     },
     setProgress(state, a: PayloadAction<{ value: number; label?: string }>) {
       state.progress = a.payload.value;
@@ -125,13 +147,28 @@ const slice = createSlice({
     setChatPending(state, a: PayloadAction<boolean>) {
       state.chatPending = a.payload;
     },
-    saveComplaint(state) {
-      const id = `CC-${String(state.saved.length + 1).padStart(4, "0")}`;
+    saveComplaint(state, a: PayloadAction<{ id: string } | undefined>) {
+      const id = a?.payload?.id ?? `CC-${String(state.saved.length + 1).padStart(4, "0")}`;
       state.saved.push({
         id,
         fields: { ...state.fields },
         risk: state.assessment?.risk_class ?? "—",
       });
+    },
+    setRootCause(state, a: PayloadAction<RootCauseResult>) {
+      state.rootCause = a.payload;
+    },
+    setDuplicates(state, a: PayloadAction<DuplicateResult>) {
+      state.duplicates = a.payload;
+    },
+    setCapa(state, a: PayloadAction<CAPAResult>) {
+      state.capa = a.payload;
+    },
+    setAiSummary(state, a: PayloadAction<SummaryResult>) {
+      state.aiSummary = a.payload;
+    },
+    setCompleteness(state, a: PayloadAction<CompletenessResult>) {
+      state.completeness = a.payload;
     },
   },
 });
@@ -146,6 +183,11 @@ export const {
   pushChat,
   setChatPending,
   saveComplaint,
+  setRootCause,
+  setDuplicates,
+  setCapa,
+  setAiSummary,
+  setCompleteness,
 } = slice.actions;
 
 export default slice.reducer;
